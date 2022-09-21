@@ -1,5 +1,4 @@
-#include <atomic>
-#include <mutex>
+#include <vtkCallbackCommand.h>
 #include <vtkLogger.h>
 #include <vtkObject.h>
 #include <vtkOpenGLError.h>
@@ -10,13 +9,18 @@
 #include <vtkOpenGLState.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
+#include <vtkRenderer.h>
 #include <vtkShaderProgram.h>
 #include <vtkSmartPointer.h>
 #include <vtkTextureObject.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtk_glew.h>
 
+#include <atomic>
+#include <chrono>
 #include <future>
+#include <mutex>
+#include <thread>
 
 static const char *VertexShader =
     R"***(
@@ -33,6 +37,7 @@ static const int width = 480;
 static const int height = 480;
 vtkNew<vtkTextureObject> displayTexture, loaderTexture;
 std::atomic<bool> initialized, finalize;
+std::mutex texMtx;
 
 vtkSmartPointer<vtkUnsignedCharArray> GenerateImage(int w, int h, int seed) {
   auto image = vtk::TakeSmartPointer(vtkUnsignedCharArray::New());
@@ -60,6 +65,7 @@ void Upload2D(vtkSmartPointer<vtkUnsignedCharArray> arr,
   if (!initialized) {
     return;
   }
+  std::unique_lock<std::mutex> lk(texMtx);
   const auto target = texture->GetTarget();
   const auto handle = texture->GetHandle();
   const auto components = texture->GetComponents();
@@ -80,35 +86,29 @@ void CopyToFrameBuffer(vtkTextureObject *texture,
   if (!initialized) {
     return;
   }
+  std::unique_lock<std::mutex> lk(texMtx);
   texture->CopyToFrameBuffer(nullptr, nullptr);
 }
 
 void loader(vtkRenderWindow *sharedWin) {
-  vtkNew<vtkRenderWindowInteractor> iren;
   vtkNew<vtkRenderWindow> rwin;
   vtkLogger::SetThreadName("Resource Loader");
   rwin->SetWindowName("Resource Loader");
   rwin->SetSize(width, height);
   rwin->SetSharedRenderWindow(sharedWin);
+  rwin->ShowWindowOff();
   auto oglRwin = vtkOpenGLRenderWindow::SafeDownCast(rwin);
 
-  iren->SetRenderWindow(rwin);
-  iren->Initialize();
+  oglRwin->Initialize();
   loaderTexture->SetContext(oglRwin);
   Allocate2D(loaderTexture, oglRwin);
   displayTexture->AssignToExistingTexture(loaderTexture->GetHandle(),
                                           loaderTexture->GetTarget());
-  displayTexture->Resize(width, height);
   initialized = true;
   int seed = 0;
-  while (!finalize)
-  {
+  while (!finalize) {
     auto image = GenerateImage(width, height, seed++);
-    rwin->Start();
     Upload2D(image, loaderTexture, oglRwin);
-    CopyToFrameBuffer(loaderTexture, oglRwin);
-    rwin->End();
-    rwin->Frame();
   }
   loaderTexture->ReleaseGraphicsResources(oglRwin);
 }
@@ -116,9 +116,11 @@ void loader(vtkRenderWindow *sharedWin) {
 int main(int argc, char *argv[]) {
   vtkNew<vtkRenderWindowInteractor> iren;
   vtkNew<vtkRenderWindow> rwin;
+  vtkNew<vtkRenderer> ren;
   vtkLogger::SetThreadName("Display");
   rwin->SetWindowName("Display");
   rwin->SetSize(width, height);
+  rwin->AddRenderer(ren);
   auto oglRwin = vtkOpenGLRenderWindow::SafeDownCast(rwin);
 
   iren->SetRenderWindow(rwin);
@@ -127,19 +129,29 @@ int main(int argc, char *argv[]) {
   displayTexture->SetContext(oglRwin);
   auto result = std::async(std::launch::async, &loader, rwin.GetPointer());
 
-  while (!iren->GetDone()) 
-  {
-    if (initialized && !displayTexture->GetHandle())
-    {
+  vtkNew<vtkCallbackCommand> cmd;
+  cmd->SetClientData(displayTexture);
+  cmd->SetCallback([](vtkObject *renObj, unsigned long, void *cd, void *) {
+    auto rend = vtkRenderer::SafeDownCast(renObj);
+    auto tex = reinterpret_cast<vtkTextureObject *>(cd);
+    CopyToFrameBuffer(tex, nullptr);
+  });
+  ren->AddObserver(vtkCommand::EndEvent, cmd);
+
+  iren->EnableRenderOff();
+  while (!iren->GetDone()) {
+    if (initialized && !displayTexture->GetHandle()) {
       finalize = true;
       result.get();
       break;
     }
-    rwin->Start();
-    CopyToFrameBuffer(displayTexture, oglRwin);
-    rwin->End();
-    rwin->Frame();
+    if (initialized && displayTexture->GetWidth() == 0) {
+      displayTexture->Resize(width, height);
+    }
+    rwin->Render();
     iren->ProcessEvents();
   }
+  finalize = true;
+  result.get();
   return 0;
 }
