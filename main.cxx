@@ -22,17 +22,6 @@
 #include <mutex>
 #include <thread>
 
-static const char *VertexShader =
-    R"***(
-  //VTK::System::Dec
-  in vec4 vertexMC;
-
-  void main()
-  {
-    gl_Position = vertexMC;
-  }
-  )***";
-
 static const int width = 480;
 static const int height = 480;
 vtkNew<vtkTextureObject> displayTexture, loaderTexture;
@@ -55,12 +44,12 @@ vtkSmartPointer<vtkUnsignedCharArray> GenerateImage(int w, int h, int seed) {
   return image;
 }
 
-void Allocate2D(vtkTextureObject *texture, vtkOpenGLRenderWindow *oglRwin) {
+void Allocate2D(vtkTextureObject *texture) {
   texture->Allocate2D(width, height, 4, VTK_UNSIGNED_CHAR, 0);
 }
 
 void Upload2D(vtkSmartPointer<vtkUnsignedCharArray> arr,
-              vtkTextureObject *texture, vtkOpenGLRenderWindow *oglRwin) {
+              vtkTextureObject *texture) {
 
   if (!initialized) {
     return;
@@ -81,8 +70,7 @@ void Upload2D(vtkSmartPointer<vtkUnsignedCharArray> arr,
   glBindTexture(target, 0);
 }
 
-void CopyToFrameBuffer(vtkTextureObject *texture,
-                       vtkOpenGLRenderWindow *oglRwin) {
+void CopyToFrameBuffer(vtkTextureObject *texture) {
   if (!initialized) {
     return;
   }
@@ -101,14 +89,14 @@ void loader(vtkRenderWindow *sharedWin) {
 
   oglRwin->Initialize();
   loaderTexture->SetContext(oglRwin);
-  Allocate2D(loaderTexture, oglRwin);
+  Allocate2D(loaderTexture);
   displayTexture->AssignToExistingTexture(loaderTexture->GetHandle(),
                                           loaderTexture->GetTarget());
   initialized = true;
   int seed = 0;
   while (!finalize) {
     auto image = GenerateImage(width, height, seed++);
-    Upload2D(image, loaderTexture, oglRwin);
+    Upload2D(image, loaderTexture);
   }
   loaderTexture->ReleaseGraphicsResources(oglRwin);
 }
@@ -125,8 +113,8 @@ int main(int argc, char *argv[]) {
 
   iren->SetRenderWindow(rwin);
   iren->Initialize();
+
   initialized = false;
-  displayTexture->SetContext(oglRwin);
   auto result = std::async(std::launch::async, &loader, rwin.GetPointer());
 
   vtkNew<vtkCallbackCommand> cmd;
@@ -134,19 +122,29 @@ int main(int argc, char *argv[]) {
   cmd->SetCallback([](vtkObject *renObj, unsigned long, void *cd, void *) {
     auto rend = vtkRenderer::SafeDownCast(renObj);
     auto tex = reinterpret_cast<vtkTextureObject *>(cd);
-    CopyToFrameBuffer(tex, nullptr);
+    CopyToFrameBuffer(tex);
   });
   ren->AddObserver(vtkCommand::EndEvent, cmd);
 
+  // on windows, wglShareLists will fail if the target render context
+  // is current in another thread. let's release our context and wait
+  // till loader thread render context is initialized.
+  oglRwin->ReleaseCurrent();
+
+  // wait till initialize.
+  while (!initialized)
+  {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  displayTexture->SetContext(oglRwin);
+  displayTexture->Resize(width, height);
   iren->EnableRenderOff();
   while (!iren->GetDone()) {
-    if (initialized && !displayTexture->GetHandle()) {
+    if (!displayTexture->GetHandle()) {
       finalize = true;
       result.get();
       break;
-    }
-    if (initialized && displayTexture->GetWidth() == 0) {
-      displayTexture->Resize(width, height);
     }
     rwin->Render();
     iren->ProcessEvents();
