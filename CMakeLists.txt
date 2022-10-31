@@ -4,7 +4,7 @@ find_package(VTK COMPONENTS
   CommonCore
   InteractionStyle
   RenderingCore
-	RenderingUI
+  RenderingUI
   RenderingOpenGL2
 )
 add_executable(main MACOSX_BUNDLE main.cxx)

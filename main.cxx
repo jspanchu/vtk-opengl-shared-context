@@ -24,6 +24,7 @@
 
 static const int width = 480;
 static const int height = 480;
+static const int framerate = 60;
 vtkNew<vtkTextureObject> displayTexture, loaderTexture;
 std::atomic<bool> initialized, finalize;
 std::mutex texMtx;
@@ -96,6 +97,7 @@ void loader(vtkRenderWindow *sharedWin) {
   int seed = 0;
   while (!finalize) {
     auto image = GenerateImage(width, height, seed++);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000/framerate));
     Upload2D(image, loaderTexture);
   }
   loaderTexture->ReleaseGraphicsResources(oglRwin);
@@ -146,6 +148,7 @@ int main(int argc, char *argv[]) {
       result.get();
       break;
     }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000/framerate));
     rwin->Render();
     iren->ProcessEvents();
   }
